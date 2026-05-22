@@ -1,0 +1,31 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Monochrome black on transparent: works as macOS template tray icon
+       AND as a standard app icon. -->
+  <g fill="black" stroke="black" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- Pommel cap on the handle butt -->
+    <circle cx="170" cy="370" r="62"/>
+
+    <!-- Handle: thick stroke tilted up-right -->
+    <line x1="170" y1="370" x2="460" y2="230" stroke-width="130" fill="none"/>
+
+    <!-- Lash: big curl swinging right and down, then back toward center.
+         Stroke widths decrease across segments to fake a taper. -->
+    <path d="M 460 230
+             C 740 270, 900 500, 830 730
+             C 770 920, 480 980, 330 810
+             C 210 670, 290 490, 470 490"
+          stroke-width="92" fill="none"/>
+
+    <path d="M 470 490
+             C 560 490, 610 540, 605 610"
+          stroke-width="58" fill="none"/>
+
+    <path d="M 605 610
+             C 600 660, 575 680, 555 690"
+          stroke-width="28" fill="none"/>
+
+    <!-- Tip popper -->
+    <circle cx="555" cy="690" r="14"/>
+  </g>
+</svg>
