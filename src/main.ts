@@ -8,8 +8,11 @@ const ctx = canvas.getContext("2d")!;
 function fitCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
-  canvas.width = Math.floor(rect.width * dpr);
-  canvas.height = Math.floor(rect.height * dpr);
+  // Use ceil for the backing store so it always covers the CSS area —
+  // a floor-truncated backing leaves a 1px strip at the right/bottom
+  // that clearRect never touches, which builds up whip trails.
+  canvas.width = Math.ceil(rect.width * dpr);
+  canvas.height = Math.ceil(rect.height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 fitCanvas();
@@ -209,7 +212,13 @@ function frame() {
     initialized = true;
   }
 
-  ctx.clearRect(0, 0, w, h);
+  // Clear the entire backing store, not just the transformed CSS area, so
+  // any sub-pixel edge strip can't accumulate trails.
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
   drawCharacter(cx, cy);
 
   stepWhip(mouseX || cx + 60, mouseY || cy);
