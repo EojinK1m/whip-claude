@@ -1,4 +1,5 @@
 use tauri::{
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Manager, PhysicalPosition, WebviewWindow,
 };
@@ -46,7 +47,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Right-click menu on the tray: just Quit. Without this the
+            // user has no way to exit since the dock icon is hidden.
+            let quit = MenuItem::with_id(app, "quit", "Quit whip-claude", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&quit])?;
+
             if let Some(tray) = app.tray_by_id("main-tray") {
+                tray.set_menu(Some(menu))?;
+                // The menu would normally open on left-click too; suppress
+                // that so left-click can still toggle the bubble window.
+                tray.set_show_menu_on_left_click(false)?;
+
+                tray.on_menu_event(|app, event| {
+                    if event.id.as_ref() == "quit" {
+                        app.exit(0);
+                    }
+                });
+
                 tray.on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
