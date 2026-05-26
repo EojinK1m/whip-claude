@@ -19,10 +19,11 @@ fitCanvas();
 window.addEventListener("resize", fitCanvas);
 
 // -------- whip (verlet rope) ----------------------------------------------
-const SEGMENT_COUNT = 22;       // total nodes including the handle
-const HANDLE_NODES = 4;         // first N nodes form the stiff handle
+const SEGMENT_COUNT = 24;       // total nodes including the handle
+const HANDLE_NODES = 7;         // first N nodes form the rigid stick handle
 const SEGMENT_LEN = 7;          // distance constraint between nodes (px)
-const ITER = 18;                // constraint solver passes per frame
+const HANDLE_WIDTH = 13;        // visual stick thickness (px)
+const ITER = 20;                // constraint solver passes per frame
 const GRAVITY = 0.35;
 const DAMPING = 0.985;
 
@@ -36,8 +37,97 @@ function initWhip(x: number, y: number) {
   }
 }
 
-function stepWhip(handleX: number, handleY: number) {
-  for (let i = 0; i < nodes.length; i++) {
+// Direction the handle points (butt → joint) at rest, in degrees clockwise
+// from +x. 255° = up-and-left, so the butt sits down-and-right of the
+// joint (= cursor) and the lash extends up-and-left from the joint via
+// the follow-handle constraint.
+const HANDLE_ANGLE_DEG = 255;
+const HANDLE_ANGLE = (HANDLE_ANGLE_DEG * Math.PI) / 180;
+// Minimum cursor displacement from the click anchor before we update the
+// butt direction. Keeps the handle from snapping when the user just
+// clicks without moving (cursor == anchor → direction is undefined).
+const MIN_DRAG = 4;
+// Bend-stiffness: each interior lash node is pulled toward the midpoint of
+// its neighbors. Provides general straightening; follow-handle (below)
+// owns the directional alignment with the stick.
+const BEND_NEAR_HANDLE = 0.35;
+// Follow-handle strength per lash node, smoothly decaying. Each node is
+// pulled onto the line extending out from the handle in the stick's
+// direction. Long, smooth taper so there's no abrupt "no-force" zone
+// after the rigid section — closer to the handle = closer to handle's
+// rigidity, blending into floppy tail by the end of the array.
+const FOLLOW_K = [
+  0.16, 0.13, 0.1, 0.08, 0.063, 0.05, 0.04, 0.032, 0.025, 0.019, 0.014, 0.01,
+  0.007, 0.004,
+];
+// Physical handle length from butt to lash joint.
+const HANDLE_LEN = (HANDLE_NODES - 1) * SEGMENT_LEN;
+// While gripping, the joint is spring-pulled toward the anchor each
+// frame. Smaller k = heavier feel (joint drifts slowly back to anchor
+// instead of snapping). 0.15 ≈ heavy mass with light give.
+const GRIP_ANCHOR_K = 0.15;
+
+// Butt direction (from joint outward to butt) while gripping. Kept as
+// state across frames so a click without movement keeps the last good
+// direction instead of collapsing the handle to a single point.
+let gripDirX = -Math.cos(HANDLE_ANGLE);
+let gripDirY = -Math.sin(HANDLE_ANGLE);
+
+// Resolve where the butt and joint (handle's lash-side end) should be
+// this frame, based on gripping state. The handle is treated as a
+// perfectly rigid rod between these two points — no verlet flexing.
+function resolveHandleEndpoints(
+  cursorX: number,
+  cursorY: number,
+  gripping: boolean,
+  anchorX: number,
+  anchorY: number
+): { buttX: number; buttY: number; tipX: number; tipY: number } {
+  if (gripping) {
+    // The joint (handle's lash-side end, where the cursor "sits") gets
+    // spring-pulled toward the click anchor each frame. Low k makes it
+    // feel heavy — it doesn't snap, just slowly relaxes back to anchor.
+    const joint = nodes[HANDLE_NODES - 1];
+    const tipX = joint.x + (anchorX - joint.x) * GRIP_ANCHOR_K;
+    const tipY = joint.y + (anchorY - joint.y) * GRIP_ANCHOR_K;
+
+    // Compass: cursor's offset from anchor sets the butt's angular
+    // position around the joint. The butt sits on the OPPOSITE side of
+    // the joint from the cursor — your hand pulls back while you aim
+    // the lash toward where the cursor is pointing. When the cursor is
+    // sitting on the anchor (just clicked, no drag yet), gripDir keeps
+    // its previous value so the handle never collapses to a point.
+    const dx = cursorX - anchorX;
+    const dy = cursorY - anchorY;
+    const mag = Math.hypot(dx, dy);
+    if (mag > MIN_DRAG) {
+      gripDirX = -dx / mag;
+      gripDirY = -dy / mag;
+    }
+    const buttX = tipX + gripDirX * HANDLE_LEN;
+    const buttY = tipY + gripDirY * HANDLE_LEN;
+    return { buttX, buttY, tipX, tipY };
+  }
+
+  // Free mode: cursor IS the joint, and the butt sits up-and-left of it
+  // at the resting handle angle. Moving the cursor translates the whole
+  // whip rigidly — handle angle stays fixed in world space.
+  const tipX = cursorX;
+  const tipY = cursorY;
+  const buttX = cursorX - Math.cos(HANDLE_ANGLE) * HANDLE_LEN;
+  const buttY = cursorY - Math.sin(HANDLE_ANGLE) * HANDLE_LEN;
+  return { buttX, buttY, tipX, tipY };
+}
+
+function stepWhip(
+  cursorX: number,
+  cursorY: number,
+  gripping: boolean,
+  anchorX: number,
+  anchorY: number
+) {
+  // Integrate only the LASH (handle is set rigidly each frame).
+  for (let i = HANDLE_NODES; i < nodes.length; i++) {
     const n = nodes[i];
     const vx = (n.x - n.px) * DAMPING;
     const vy = (n.y - n.py) * DAMPING;
@@ -47,40 +137,89 @@ function stepWhip(handleX: number, handleY: number) {
     n.y += vy + GRAVITY;
   }
 
-  nodes[0].x = handleX;
-  nodes[0].y = handleY;
+  // Place the handle as a perfectly straight rod between butt and tip.
+  // nodes[HANDLE_NODES-1] is the lash joint that the lash hangs off.
+  const { buttX, buttY, tipX, tipY } = resolveHandleEndpoints(
+    cursorX,
+    cursorY,
+    gripping,
+    anchorX,
+    anchorY
+  );
+  for (let i = 0; i < HANDLE_NODES; i++) {
+    const t = i / (HANDLE_NODES - 1);
+    const x = buttX + (tipX - buttX) * t;
+    const y = buttY + (tipY - buttY) * t;
+    nodes[i].px = nodes[i].x; // record the previous frame's pos so the
+    nodes[i].py = nodes[i].y; // lash joint's motion transfers as velocity
+    nodes[i].x = x;            // through the first lash distance constraint
+    nodes[i].y = y;
+  }
 
+  // Direction the handle currently points (butt -> tip), normalized. Each
+  // lash node in the follow-region gets pulled onto this extended line so
+  // the lash starts aligned with the stick and tapers off smoothly.
+  const dirX = (tipX - buttX) / HANDLE_LEN;
+  const dirY = (tipY - buttY) / HANDLE_LEN;
+
+  // Lash-only constraint pass. The lash hangs from the now-rigid handle tip;
+  // its motion comes purely from how the tip moves frame-to-frame, gravity,
+  // and the cascading rope corrections. The cursor never pulls it directly.
+  const lashFirst = HANDLE_NODES;
+  const lashSpan = nodes.length - lashFirst - 1;
   for (let iter = 0; iter < ITER; iter++) {
-    // Handle: stiff — only the trailing node moves.
-    for (let i = 1; i < HANDLE_NODES; i++) {
-      const prev = nodes[i - 1];
-      const cur = nodes[i];
-      const dx = cur.x - prev.x;
-      const dy = cur.y - prev.y;
-      const dist = Math.hypot(dx, dy) || 1;
-      const diff = (dist - SEGMENT_LEN) / dist;
-      cur.x -= dx * diff;
-      cur.y -= dy * diff;
+    // Follow-handle: pull the first few lash nodes onto the line extending
+    // out from the handle tip. This is what makes the lash start in the
+    // handle's direction instead of dangling straight down from the joint.
+    for (let j = 0; j < FOLLOW_K.length; j++) {
+      const i = lashFirst + j;
+      if (i >= nodes.length) break;
+      const step = j + 1;
+      const tgtX = tipX + dirX * SEGMENT_LEN * step;
+      const tgtY = tipY + dirY * SEGMENT_LEN * step;
+      const k = FOLLOW_K[j];
+      nodes[i].x += (tgtX - nodes[i].x) * k;
+      nodes[i].y += (tgtY - nodes[i].y) * k;
     }
-    // Rope: split correction so the lash drapes naturally.
-    for (let i = HANDLE_NODES; i < nodes.length; i++) {
+
+    for (let i = lashFirst; i < nodes.length; i++) {
       const prev = nodes[i - 1];
       const cur = nodes[i];
       const dx = cur.x - prev.x;
       const dy = cur.y - prev.y;
       const dist = Math.hypot(dx, dy) || 1;
       const diff = (dist - SEGMENT_LEN) / dist;
-      const halfX = dx * 0.5 * diff;
-      const halfY = dy * 0.5 * diff;
-      if (i - 1 >= HANDLE_NODES) {
+      // The handle tip (prev when i === lashFirst) is a hard anchor —
+      // only the lash side gets corrected. Subsequent lash links share.
+      if (i === lashFirst) {
+        cur.x -= dx * diff;
+        cur.y -= dy * diff;
+      } else {
+        const halfX = dx * 0.5 * diff;
+        const halfY = dy * 0.5 * diff;
         prev.x += halfX;
         prev.y += halfY;
+        cur.x -= halfX;
+        cur.y -= halfY;
       }
-      cur.x -= halfX;
-      cur.y -= halfY;
     }
-    nodes[0].x = handleX;
-    nodes[0].y = handleY;
+
+    // Bend constraint: pull each interior lash node toward the midpoint
+    // of its neighbors. Strength tapers from BEND_NEAR_HANDLE at the
+    // first lash node down to 0 at the tip — stiffer near the handle,
+    // floppy at the tip. The handle joint itself is the rigid anchor.
+    for (let i = lashFirst; i < nodes.length - 1; i++) {
+      const t = lashSpan > 0 ? (i - lashFirst) / lashSpan : 1;
+      const k = BEND_NEAR_HANDLE * (1 - t);
+      if (k <= 0) continue;
+      const a = nodes[i - 1];
+      const b = nodes[i];
+      const c = nodes[i + 1];
+      const mx = (a.x + c.x) * 0.5;
+      const my = (a.y + c.y) * 0.5;
+      b.x += (mx - b.x) * k;
+      b.y += (my - b.y) * k;
+    }
   }
 }
 
@@ -88,26 +227,9 @@ function drawWhip() {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
-  // Handle
-  ctx.strokeStyle = "#6b3a1f";
-  ctx.lineWidth = 8;
-  ctx.beginPath();
-  ctx.moveTo(nodes[0].x, nodes[0].y);
-  for (let i = 1; i < HANDLE_NODES; i++) ctx.lineTo(nodes[i].x, nodes[i].y);
-  ctx.stroke();
-
-  // Handle grip rings
-  ctx.strokeStyle = "#3a1f10";
-  ctx.lineWidth = 2;
-  for (let i = 1; i < HANDLE_NODES; i++) {
-    ctx.beginPath();
-    ctx.arc(nodes[i].x, nodes[i].y, 4, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  // Rope: taper from thick near handle to thin at the tip.
-  for (let i = HANDLE_NODES; i < nodes.length - 1; i++) {
-    const t = (i - HANDLE_NODES) / (nodes.length - HANDLE_NODES);
+  // Lash first so the handle covers the joint cleanly.
+  for (let i = HANDLE_NODES - 1; i < nodes.length - 1; i++) {
+    const t = (i - (HANDLE_NODES - 1)) / (nodes.length - HANDLE_NODES);
     const width = 5 * (1 - t) + 1.2 * t;
     ctx.strokeStyle = t < 0.7 ? "#2b2117" : "#1a130d";
     ctx.lineWidth = width;
@@ -117,12 +239,55 @@ function drawWhip() {
     ctx.stroke();
   }
 
-  // Tip popper
+  // Tip popper.
   const tip = nodes[nodes.length - 1];
   ctx.fillStyle = "#0e0a06";
   ctx.beginPath();
   ctx.arc(tip.x, tip.y, 2.5, 0, Math.PI * 2);
   ctx.fill();
+
+  // Handle drawn as a single rigid rod from the butt to the lash joint.
+  // The handle nodes are stiff-constrained so this stays straight.
+  const a = nodes[0];
+  const b = nodes[HANDLE_NODES - 1];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  const w = HANDLE_WIDTH;
+
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(angle);
+
+  // Stick body — rounded rectangle along +x.
+  ctx.fillStyle = "#6b3a1f";
+  ctx.strokeStyle = "#2a1608";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(-w * 0.4, -w / 2, len + w * 0.4, w, w / 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Pommel cap at the butt.
+  ctx.fillStyle = "#2a1608";
+  ctx.beginPath();
+  ctx.arc(0, 0, w * 0.55, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Grip ridges along the stick — subtle horizontal lines.
+  ctx.strokeStyle = "#3a1f10";
+  ctx.lineWidth = 1;
+  const ridges = 4;
+  for (let i = 1; i <= ridges; i++) {
+    const x = (len * i) / (ridges + 1);
+    ctx.beginPath();
+    ctx.moveTo(x, -w / 2 + 1);
+    ctx.lineTo(x, w / 2 - 1);
+    ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 // -------- character -------------------------------------------------------
@@ -186,8 +351,13 @@ function crack(volume: number) {
 let mouseX = 0;
 let mouseY = 0;
 let initialized = false;
+let gripping = false;
+let anchorX = 0;
+let anchorY = 0;
 
-canvas.addEventListener("mousemove", (e) => {
+// Track the cursor at window level so dragging past the canvas (or into
+// the bubble's rounded-corner gap) doesn't stop updates or release grip.
+window.addEventListener("mousemove", (e) => {
   const r = canvas.getBoundingClientRect();
   mouseX = e.clientX - r.left;
   mouseY = e.clientY - r.top;
@@ -195,6 +365,24 @@ canvas.addEventListener("mousemove", (e) => {
     initWhip(mouseX, mouseY);
     initialized = true;
   }
+});
+
+canvas.addEventListener("mousedown", (e) => {
+  const r = canvas.getBoundingClientRect();
+  // Anchor the joint at the click position. The joint stays here (with
+  // heavy spring give) while the cursor's offset rotates the butt around
+  // it. Reset gripDir to the resting direction so the very first frame
+  // of gripping matches the non-grip pose — no visual jump or collapse.
+  anchorX = e.clientX - r.left;
+  anchorY = e.clientY - r.top;
+  gripDirX = -Math.cos(HANDLE_ANGLE);
+  gripDirY = -Math.sin(HANDLE_ANGLE);
+  gripping = true;
+});
+// Release on window so it fires even if the cursor left the canvas
+// before the user lifted the button. Don't react to mouseleave at all.
+window.addEventListener("mouseup", () => {
+  gripping = false;
 });
 
 let lastTip = { x: 0, y: 0 };
@@ -221,7 +409,7 @@ function frame() {
 
   drawCharacter(cx, cy);
 
-  stepWhip(mouseX || cx + 60, mouseY || cy);
+  stepWhip(mouseX || cx + 60, mouseY || cy, gripping, anchorX, anchorY);
   drawWhip();
 
   const tip = nodes[nodes.length - 1];
