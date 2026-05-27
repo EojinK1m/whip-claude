@@ -57,8 +57,18 @@ pub fn run() {
                 false,
                 None::<&str>,
             )?;
+            // Barrier mode: when on, hits show the red shield flash instead
+            // of triggering character reactions (the character is "invincible").
+            let barrier = CheckMenuItem::with_id(
+                app,
+                "barrier",
+                "Barrier mode",
+                true,
+                false,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit whip-claude", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&light, &quit])?;
+            let menu = Menu::with_items(app, &[&light, &barrier, &quit])?;
 
             if let Some(tray) = app.tray_by_id("main-tray") {
                 tray.set_menu(Some(menu))?;
@@ -71,12 +81,17 @@ pub fn run() {
                 // to the webview. CheckMenuItem auto-flips its check on
                 // click; we just observe and broadcast.
                 let light_item = light.clone();
+                let barrier_item = barrier.clone();
                 tray.on_menu_event(move |app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
                     "light" => {
                         let checked = light_item.is_checked().unwrap_or(false);
                         let theme = if checked { "light" } else { "dark" };
                         let _ = app.emit("set-theme", theme);
+                    }
+                    "barrier" => {
+                        let checked = barrier_item.is_checked().unwrap_or(false);
+                        let _ = app.emit("set-barrier", checked);
                     }
                     _ => {}
                 });

@@ -14,6 +14,14 @@ listen<string>("set-theme", (e) => {
   document.body.classList.toggle("light", e.payload === "light");
 });
 
+// Barrier mode: tray toggle. When on, hits show the old red shield flash
+// instead of making the character react. Off (default) = character reacts
+// based on whip speed.
+let barrierMode = false;
+listen<boolean>("set-barrier", (e) => {
+  barrierMode = e.payload;
+});
+
 function fitCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -312,15 +320,219 @@ characterImg.onload = () => {
 };
 characterImg.src = characterUrl;
 
+// -------- character reactions ---------------------------------------------
+// Hits drive a tiered reaction: ouch (light), wobble (medium), cry (hard).
+// Tier is picked by tip speed at the moment of contact. Each reaction owns
+// its own animation shape; see drawCharacter / drawExpression below.
+// Three escalating tiers, picked by tip speed at contact:
+//   ouch    — light tap: brief squish + ">_<" squint
+//   tremble — medium hit: high-freq vibration + "x x" dizzy eyes
+//   wobble  — hard hit: damped side-lurch + closed crying eyes & tears
+type ReactionType = "none" | "ouch" | "tremble" | "wobble";
+const REACTION_ORDER: ReactionType[] = ["none", "ouch", "tremble", "wobble"];
+const REACTION_FRAMES: Record<ReactionType, number> = {
+  none: 0,
+  ouch: 18,
+  tremble: 36,
+  wobble: 60,
+};
+let reactionType: ReactionType = "none";
+let reactionTimer = 0;
+let reactionMax = 1;
+
+// Rare floating speech bubble ("으앙..") spawned with 5% chance on a hit.
+// Lives ~2s, drifts up and fades, sits at Claude's upper-right.
+const SPEECH_FRAMES = 120; // ~2s at 60fps
+let speechTimer = 0;
+
+function triggerReaction(speed: number) {
+  // Tip speed at impact ranges roughly from the 8-px hit-detection floor
+  // up to 60+ px/frame on a full crack. Thresholds picked so a casual
+  // swing lands in "ouch", a brisk strike in "tremble", and only a real
+  // crack pushes into "wobble".
+  const next: ReactionType =
+    speed > 45 ? "wobble" : speed > 22 ? "tremble" : "ouch";
+  // While a reaction is still playing, only allow upgrades. A light hit
+  // shouldn't downgrade an active cry to ouch — that looks like the
+  // character "shrugged off" the worse hit.
+  const curIdx = REACTION_ORDER.indexOf(reactionType);
+  const newIdx = REACTION_ORDER.indexOf(next);
+  if (reactionTimer > 0 && newIdx < curIdx) return;
+  reactionType = next;
+  reactionMax = REACTION_FRAMES[next];
+  reactionTimer = reactionMax;
+}
+
 function drawCharacter(cx: number, cy: number) {
   if (!characterReady) return;
+
+  // Reaction transform: offset/rotation/scale applied to the icon itself.
+  // Each tier shapes the motion differently; see comments per branch.
+  let offsetX = 0;
+  let offsetY = 0;
+  let rotation = 0;
+  let scaleX = 1;
+  let scaleY = 1;
+
+  if (reactionTimer > 0) {
+    // t goes 0 → 1 over the reaction's lifetime.
+    const t = 1 - reactionTimer / reactionMax;
+    if (reactionType === "ouch") {
+      // Brief vertical squish that peaks mid-reaction and resolves.
+      const s = Math.sin(t * Math.PI) * 0.1;
+      scaleX = 1 + s;
+      scaleY = 1 - s;
+    } else if (reactionType === "tremble") {
+      // High-frequency random jitter — character vibrating from the hit.
+      // Decays smoothly so the buzz fades out instead of cutting.
+      const decay = Math.exp(-t * 1.5);
+      offsetX = (Math.random() - 0.5) * 3.5 * decay;
+      offsetY = (Math.random() - 0.5) * 2 * decay;
+    } else if (reactionType === "wobble") {
+      // Damped oscillation: lurches sideways and rotates, settling back.
+      // Slowest decay of the three so the stagger reads as the hardest hit.
+      const decay = Math.exp(-t * 2);
+      const phase = t * Math.PI * 5;
+      rotation = Math.sin(phase) * 0.4 * decay;
+      offsetX = Math.sin(phase) * 11 * decay;
+    }
+  }
+
+  ctx.save();
+  ctx.translate(cx + offsetX, cy + offsetY);
+  ctx.rotate(rotation);
+  ctx.scale(scaleX, scaleY);
   ctx.drawImage(
     characterImg,
-    cx - CHARACTER_SIZE / 2,
-    cy - CHARACTER_SIZE / 2,
+    -CHARACTER_SIZE / 2,
+    -CHARACTER_SIZE / 2,
     CHARACTER_SIZE,
     CHARACTER_SIZE
   );
+  // Eye overlay sits inside the same transform so it tilts/wobbles with
+  // the head. Drawn at icon-local coords (origin = icon center).
+  if (reactionTimer > 0 && reactionType !== "none") {
+    drawReactionEyes(reactionType);
+  }
+  ctx.restore();
+}
+
+// Small "으앙.." text floating off Claude's upper-right corner. Drawn in
+// world space (not inside the character's reaction transform) so the
+// bubble doesn't wobble along with the head. Fade in fast, hold, fade
+// out near the end; drifts up slightly the whole time.
+function drawSpeech(cx: number, cy: number) {
+  if (speechTimer <= 0) return;
+  const t = 1 - speechTimer / SPEECH_FRAMES;
+  const fade =
+    t < 0.1 ? t / 0.1 : t > 0.8 ? Math.max(0, (1 - t) / 0.2) : 1;
+  const rise = t * 10;
+  const x = cx + CHARACTER_SIZE * 0.42;
+  const y = cy - CHARACTER_SIZE * 0.46 - rise;
+
+  const isLight = document.body.classList.contains("light");
+  ctx.save();
+  ctx.globalAlpha = fade;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = "600 13px -apple-system, BlinkMacSystemFont, sans-serif";
+  // Outline so it reads on either theme without needing per-theme color.
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = isLight ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.7)";
+  ctx.strokeText("으앙..", x, y);
+  ctx.fillStyle = isLight ? "#333" : "#fff";
+  ctx.fillText("으앙..", x, y);
+  ctx.restore();
+}
+
+// Replace the icon's two eye-hole rectangles with a reaction-specific
+// shape. The SVG places the eye rects at x∈[6,7.49]/[16.51,18],
+// y∈[8.10,10.95] inside a 24×24 viewBox; we cover those holes with the
+// logo's orange and draw the new shape on top so the bubble bg doesn't
+// bleed through.
+function drawReactionEyes(type: ReactionType) {
+  const scale = CHARACTER_SIZE / 24;
+  const eyeDX = 5.255 * scale; // half-distance between the two eyes
+  const eyeY = -2.475 * scale; // eye row, relative to icon center
+  const eyeW = 1.49 * scale;
+  const eyeH = 2.847 * scale;
+
+  // Patch the eye holes with the icon's own orange so the bubble bg
+  // doesn't bleed through and muddy the reaction mark.
+  ctx.fillStyle = "#D97757";
+  ctx.fillRect(-eyeDX - eyeW / 2, eyeY - eyeH / 2, eyeW, eyeH);
+  ctx.fillRect(eyeDX - eyeW / 2, eyeY - eyeH / 2, eyeW, eyeH);
+
+  // Mark color flips with theme: dark on dark mode (reads on orange next
+  // to a dark bubble), white on light mode (reads on orange next to a
+  // light bubble — dark marks looked too heavy/inky there).
+  const isLight = document.body.classList.contains("light");
+  ctx.strokeStyle = isLight ? "#ffffff" : "#3d1409";
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  if (type === "ouch") {
+    // ">" "<" — V-shaped squint, apex pointing inward.
+    const ax = 3.5;
+    const ay = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(-eyeDX - ax, eyeY - ay);
+    ctx.lineTo(-eyeDX + ax, eyeY);
+    ctx.lineTo(-eyeDX - ax, eyeY + ay);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(eyeDX + ax, eyeY - ay);
+    ctx.lineTo(eyeDX - ax, eyeY);
+    ctx.lineTo(eyeDX + ax, eyeY + ay);
+    ctx.stroke();
+  } else if (type === "tremble") {
+    // "x x" — two diagonals crossing per eye, dizzy/vibration look.
+    const r = 3.5;
+    for (const dx of [-eyeDX, eyeDX]) {
+      ctx.beginPath();
+      ctx.moveTo(dx - r, eyeY - r);
+      ctx.lineTo(dx + r, eyeY + r);
+      ctx.moveTo(dx + r, eyeY - r);
+      ctx.lineTo(dx - r, eyeY + r);
+      ctx.stroke();
+    }
+  } else if (type === "wobble") {
+    // Closed inverted-U eyes (∩ ∩) — squeezed-shut crying expression.
+    const r = 3.5;
+    for (const dx of [-eyeDX, eyeDX]) {
+      ctx.beginPath();
+      ctx.arc(dx, eyeY + 1, r, Math.PI, 0, true);
+      ctx.stroke();
+    }
+
+    // Tear drops falling from the outer corner of each eye. Two tears
+    // per eye at staggered phases so the drip looks continuous over the
+    // reaction lifetime. Each tear fades in fast and out near the end
+    // so it doesn't pop out of existence mid-fall.
+    const t = 1 - reactionTimer / reactionMax;
+    ctx.fillStyle = "#3a78d4";
+    const tearStartY = eyeY + 5;
+    const tearFallDist = 16;
+    for (const side of [-1, 1]) {
+      const tx = side * (eyeDX + 1.5);
+      for (let i = 0; i < 2; i++) {
+        const phase = (t * 1.6 + i * 0.5) % 1;
+        const ty = tearStartY + phase * tearFallDist;
+        const alpha =
+          phase < 0.15
+            ? phase / 0.15
+            : phase > 0.85
+              ? Math.max(0, (1 - phase) / 0.15)
+              : 1;
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.ellipse(tx, ty, 1.6, 2.6, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
 }
 
 // -------- whip-crack sound (synthesized; no asset shipped) ----------------
@@ -396,7 +608,7 @@ window.addEventListener("mouseup", () => {
 
 let lastTip = { x: 0, y: 0 };
 let cooldown = 0;
-let flashCharacter = 0;
+let barrierFlash = 0;
 
 function frame() {
   const w = canvas.clientWidth;
@@ -416,34 +628,53 @@ function frame() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.restore();
 
-  drawCharacter(cx, cy);
-
+  // Step physics first so we can hit-test against this frame's tip
+  // position BEFORE drawing the character — reaction transforms must
+  // apply on the same frame the hit lands, otherwise contact and
+  // reaction look 1 frame out of sync.
   stepWhip(mouseX || cx + 60, mouseY || cy, gripping, anchorX, anchorY);
-  drawWhip();
 
   const tip = nodes[nodes.length - 1];
   const speed = Math.hypot(tip.x - lastTip.x, tip.y - lastTip.y);
   lastTip = { x: tip.x, y: tip.y };
 
   if (cooldown > 0) cooldown--;
+  if (reactionTimer > 0) reactionTimer--;
+  if (speechTimer > 0) speechTimer--;
+  if (barrierFlash > 0) barrierFlash--;
+
   const dx = tip.x - cx;
   const dy = tip.y - cy;
   const inside = dx * dx + dy * dy < HIT_RADIUS * HIT_RADIUS;
   if (inside && speed > 8 && cooldown === 0) {
     crack(Math.min(1, speed / 30));
     cooldown = 12;
-    flashCharacter = 6;
+    if (barrierMode) {
+      // Shield up: keep the old red disc flash and skip the reaction.
+      barrierFlash = 6;
+    } else {
+      triggerReaction(speed);
+      // Small chance per hit to add a "으앙.." floater alongside the
+      // physical reaction. Only spawn if one isn't already on screen
+      // so spam-hitting doesn't keep refreshing the same bubble.
+      if (speechTimer === 0 && Math.random() < 0.05) {
+        speechTimer = SPEECH_FRAMES;
+      }
+    }
   }
 
-  if (flashCharacter > 0) {
+  drawCharacter(cx, cy);
+  drawSpeech(cx, cy);
+  drawWhip();
+
+  if (barrierFlash > 0) {
     ctx.save();
-    ctx.globalAlpha = flashCharacter / 6;
+    ctx.globalAlpha = barrierFlash / 6;
     ctx.fillStyle = "rgba(255, 80, 80, 0.35)";
     ctx.beginPath();
     ctx.arc(cx, cy, HIT_RADIUS, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    flashCharacter--;
   }
 
   requestAnimationFrame(frame);
