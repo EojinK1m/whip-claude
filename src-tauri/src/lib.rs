@@ -1,7 +1,7 @@
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
-    Manager, PhysicalPosition, WebviewWindow,
+    Emitter, Manager, PhysicalPosition, WebviewWindow,
 };
 
 const WINDOW_W: f64 = 420.0;
@@ -47,10 +47,18 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Right-click menu on the tray: just Quit. Without this the
-            // user has no way to exit since the dock icon is hidden.
+            // Right-click menu on the tray: theme toggle + Quit. Without
+            // this the user has no way to exit since the dock icon is hidden.
+            let light = CheckMenuItem::with_id(
+                app,
+                "light",
+                "Light mode",
+                true,
+                false,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit whip-claude", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&quit])?;
+            let menu = Menu::with_items(app, &[&light, &quit])?;
 
             if let Some(tray) = app.tray_by_id("main-tray") {
                 tray.set_menu(Some(menu))?;
@@ -58,10 +66,19 @@ pub fn run() {
                 // that so left-click can still toggle the bubble window.
                 tray.set_show_menu_on_left_click(false)?;
 
-                tray.on_menu_event(|app, event| {
-                    if event.id.as_ref() == "quit" {
-                        app.exit(0);
+                // Clone the check item into the menu-event closure so we
+                // can read its post-toggle state and forward the new theme
+                // to the webview. CheckMenuItem auto-flips its check on
+                // click; we just observe and broadcast.
+                let light_item = light.clone();
+                tray.on_menu_event(move |app, event| match event.id.as_ref() {
+                    "quit" => app.exit(0),
+                    "light" => {
+                        let checked = light_item.is_checked().unwrap_or(false);
+                        let theme = if checked { "light" } else { "dark" };
+                        let _ = app.emit("set-theme", theme);
                     }
+                    _ => {}
                 });
 
                 tray.on_tray_icon_event(|tray, event| {

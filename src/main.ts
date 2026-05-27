@@ -2,8 +2,17 @@
 // strikes the centered character. Keep deps zero; everything runs on Canvas2D
 // + WebAudio so the bundle stays light.
 
+import { listen } from "@tauri-apps/api/event";
+
 const canvas = document.getElementById("stage") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
+
+// Theme is controlled by the tray's "Light mode" check item. Rust emits
+// "set-theme" with "light" | "dark" on every toggle; we just flip a body
+// class — bubble background swap lives in CSS.
+listen<string>("set-theme", (e) => {
+  document.body.classList.toggle("light", e.payload === "light");
+});
 
 function fitCanvas() {
   const dpr = window.devicePixelRatio || 1;
